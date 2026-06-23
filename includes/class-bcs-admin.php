@@ -388,7 +388,7 @@ class BCS_Admin {
 				'serialized_list' => __( 'List (decode serialized)', 'brevo-contact-sync' ),
 			);
 			?>
-			<p><?php esc_html_e( 'These are the customer fields found in your WordPress users. Tick the ones to sync, choose (or create) the matching Brevo field, and pick how the value should be formatted.', 'brevo-contact-sync' ); ?></p>
+			<p><?php esc_html_e( 'These are the customer fields found in your WordPress users. Tick the ones to sync, choose (or create) the matching Brevo field, and pick how the value should be formatted. Your key fields are listed first; the rest follow by how many users have them. The contact email (top row) is always sent and can\'t be unchecked.', 'brevo-contact-sync' ); ?></p>
 
 			<p>
 				<?php $toggle = $show_all ? admin_url( 'admin.php?page=brevo-field-mapping' ) : admin_url( 'admin.php?page=brevo-field-mapping&show_all=1' ); ?>
@@ -411,6 +411,14 @@ class BCS_Admin {
 						</tr>
 					</thead>
 					<tbody>
+						<tr style="background:#eef6ff;">
+							<td title="<?php esc_attr_e( 'Always synced', 'brevo-contact-sync' ); ?>">&#10003;</td>
+							<td><code>email</code></td>
+							<td><span style="color:#666;"><?php esc_html_e( 'billing_email, then account email', 'brevo-contact-sync' ); ?></span></td>
+							<td>&mdash;</td>
+							<td><strong><?php esc_html_e( 'Contact email (identifier)', 'brevo-contact-sync' ); ?></strong></td>
+							<td><?php esc_html_e( 'Always sent', 'brevo-contact-sync' ); ?></td>
+						</tr>
 						<?php foreach ( $detected as $row ) :
 							$key       = $row['key'];
 							$has       = isset( $existing[ $key ] );

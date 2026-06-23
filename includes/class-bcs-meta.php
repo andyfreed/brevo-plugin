@@ -16,6 +16,37 @@ if ( ! defined( 'ABSPATH' ) ) {
 class BCS_Meta {
 
 	/**
+	 * Meta keys to surface at the top of the mapping page, in this order.
+	 * These are the customer fields you actually sync to Brevo; everything
+	 * else is listed afterwards by how many users have it.
+	 *
+	 * @var string[]
+	 */
+	private static $priority = array(
+		'first_name',
+		'last_name',
+		'flms_license-cfp',
+		'flms_license-eaotrp',
+		'flms_license-erpa',
+		'billing_address_1',
+		'billing_address_2',
+		'billing_city',
+		'billing_postcode',
+		'billing_state',
+		'flms_license-cpa',
+		'shipping_company',
+		'shipping_address_1',
+		'shipping_address_2',
+		'shipping_city',
+		'shipping_state',
+		'shipping_postcode',
+		'bhfe-cpa-states',
+		'billing_company',
+		'flms_has-license-iar',
+		'flms_license-iar',
+	);
+
+	/**
 	 * Exact meta keys to always hide from the mapping UI (WP/plugin internals).
 	 *
 	 * @var string[]
@@ -94,8 +125,50 @@ class BCS_Meta {
 			);
 		}
 
+		// Make sure every priority key is present, even if rarely used.
+		$present = wp_list_pluck( $out, 'key' );
+		foreach ( self::$priority as $pk ) {
+			if ( in_array( $pk, $present, true ) ) {
+				continue;
+			}
+			$sample = self::sample_value( $pk );
+			$out[]  = array(
+				'key'       => $pk,
+				'users'     => self::count_users_with( $pk ),
+				'sample'    => $sample,
+				'transform' => self::guess_transform( $sample ),
+			);
+		}
+
+		// Sort: priority keys first (in listed order), then the rest by frequency.
+		$priority = array_flip( self::$priority );
+		usort(
+			$out,
+			static function ( $a, $b ) use ( $priority ) {
+				$ia = isset( $priority[ $a['key'] ] ) ? $priority[ $a['key'] ] : PHP_INT_MAX;
+				$ib = isset( $priority[ $b['key'] ] ) ? $priority[ $b['key'] ] : PHP_INT_MAX;
+				if ( $ia !== $ib ) {
+					return $ia <=> $ib;
+				}
+				return $b['users'] <=> $a['users'];
+			}
+		);
+
 		set_transient( $cache_key, $out, HOUR_IN_SECONDS );
 		return $out;
+	}
+
+	/**
+	 * Count how many users have a given meta key.
+	 *
+	 * @param string $key Meta key.
+	 * @return int
+	 */
+	private static function count_users_with( $key ) {
+		global $wpdb;
+		return (int) $wpdb->get_var(
+			$wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->usermeta} WHERE meta_key = %s", $key )
+		);
 	}
 
 	/**

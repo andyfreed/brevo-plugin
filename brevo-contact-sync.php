@@ -3,7 +3,7 @@
  * Plugin Name:       Brevo Contact Sync (WooCommerce custom fields)
  * Plugin URI:        https://github.com/andyfreed/brevo-plugin
  * Description:       Pushes WooCommerce customers and their custom user-meta fields to Brevo as contact attributes. Auto-detects your customer meta, lets you map it to Brevo custom fields, and syncs in real time + in bulk.
- * Version:           2.0.0
+ * Version:           2.1.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            BHFE
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'BCS_VERSION', '2.0.0' );
+define( 'BCS_VERSION', '2.1.0' );
 define( 'BCS_PLUGIN_FILE', __FILE__ );
 define( 'BCS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'BCS_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
