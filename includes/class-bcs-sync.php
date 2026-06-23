@@ -272,6 +272,9 @@ class BCS_Sync {
 		if ( empty( self::get_mapping() ) ) {
 			return new WP_Error( 'bcs_no_map', __( 'Map at least one field before syncing.', 'brevo-contact-sync' ) );
 		}
+		if ( empty( self::default_list_ids() ) ) {
+			return new WP_Error( 'bcs_no_list', __( 'Choose a Brevo list on the Connection page first — Brevo\'s bulk import requires a target list. (Create one in Brevo under Contacts → Lists if you have none.)', 'brevo-contact-sync' ) );
+		}
 
 		update_option(
 			BCS_OPTION_SYNC,
@@ -350,22 +353,32 @@ class BCS_Sync {
 			}
 		}
 
-		$api     = new BCS_API();
-		$queued  = 0;
-		$failed  = 0;
-		$last    = '';
-		foreach ( array( array( $with_list, $list_ids ), array( $no_list, array() ) ) as $bucket ) {
-			list( $rows, $lists ) = $bucket;
-			if ( empty( $rows ) ) {
-				continue;
-			}
-			$result = $api->import_contacts( $rows, $lists );
+		$api    = new BCS_API();
+		$queued = 0;
+		$failed = 0;
+		$last   = '';
+
+		// Opted-in (or opt-in disabled): fast async bulk import into the list.
+		if ( ! empty( $with_list ) ) {
+			$result = $api->import_contacts( $with_list, $list_ids );
 			if ( is_wp_error( $result ) ) {
-				$failed += count( $rows );
+				$failed += count( $with_list );
 				$last    = $result->get_error_message();
 				self::log( 'Batch import failed at offset ' . $offset . ': ' . $result->get_error_message() );
 			} else {
-				$queued += count( $rows );
+				$queued += count( $with_list );
+			}
+		}
+
+		// Not opted-in: sync contact data without adding them to the list.
+		// Brevo's import endpoint requires a list, so use per-contact upsert here.
+		foreach ( $no_list as $row ) {
+			$result = $api->upsert_contact( $row['email'], isset( $row['attributes'] ) ? $row['attributes'] : array(), array() );
+			if ( is_wp_error( $result ) ) {
+				$failed++;
+				$last = $result->get_error_message();
+			} else {
+				$queued++;
 			}
 		}
 
