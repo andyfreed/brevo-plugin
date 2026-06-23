@@ -134,6 +134,19 @@ class BCS_API {
 	}
 
 	/**
+	 * Fetch a single contact by email.
+	 *
+	 * The response includes `emailBlacklisted` (true = unsubscribed from email),
+	 * `smsBlacklisted`, `listIds`, and `attributes`.
+	 *
+	 * @param string $email Contact email.
+	 * @return array|WP_Error Contact data, or WP_Error (404 if not found).
+	 */
+	public function get_contact( $email ) {
+		return $this->request( 'GET', '/contacts/' . rawurlencode( $email ) );
+	}
+
+	/**
 	 * Fetch contact lists.
 	 *
 	 * @return array|WP_Error

@@ -22,6 +22,8 @@ class BCS_Admin {
 		add_action( 'admin_post_bcs_start_sync', array( $this, 'handle_start_sync' ) );
 		add_action( 'admin_post_bcs_cancel_sync', array( $this, 'handle_cancel_sync' ) );
 		add_action( 'admin_post_bcs_rescan', array( $this, 'handle_rescan' ) );
+		add_action( 'admin_post_bcs_export_mapping', array( $this, 'handle_export_mapping' ) );
+		add_action( 'admin_post_bcs_import_mapping', array( $this, 'handle_import_mapping' ) );
 		add_filter( 'plugin_action_links_' . plugin_basename( BCS_PLUGIN_FILE ), array( $this, 'action_links' ) );
 	}
 
@@ -51,6 +53,7 @@ class BCS_Admin {
 		add_submenu_page( 'brevo-contact-sync', __( 'Connection', 'brevo-contact-sync' ), __( 'Connection', 'brevo-contact-sync' ), 'manage_options', 'brevo-contact-sync', array( $this, 'render_settings_page' ) );
 		add_submenu_page( 'brevo-contact-sync', __( 'Field Mapping', 'brevo-contact-sync' ), __( 'Field Mapping', 'brevo-contact-sync' ), 'manage_options', 'brevo-field-mapping', array( $this, 'render_mapping_page' ) );
 		add_submenu_page( 'brevo-contact-sync', __( 'Bulk Sync', 'brevo-contact-sync' ), __( 'Bulk Sync', 'brevo-contact-sync' ), 'manage_options', 'brevo-bulk-sync', array( $this, 'render_sync_page' ) );
+		add_submenu_page( 'brevo-contact-sync', __( 'Contact Status', 'brevo-contact-sync' ), __( 'Contact Status', 'brevo-contact-sync' ), 'manage_options', 'brevo-contact-status', array( $this, 'render_status_page' ) );
 	}
 
 	/* ---------------------------------------------------------------------
@@ -158,35 +161,52 @@ class BCS_Admin {
 		$attrs      = (array) ( $_POST['brevo_attr'] ?? array() );
 		$transforms = (array) ( $_POST['transform'] ?? array() );
 
-		$api      = new BCS_API();
-		$mapping  = array();
-		$created  = 0;
+		$api     = new BCS_API();
+		$mapping = array();
+		$created = 0;
+
+		// Names of attributes that already exist in Brevo.
+		$existing   = array();
+		$attrs_list = $api->get_attributes();
+		if ( ! is_wp_error( $attrs_list ) ) {
+			foreach ( $attrs_list as $a ) {
+				if ( isset( $a['name'] ) ) {
+					$existing[ strtoupper( $a['name'] ) ] = true;
+				}
+			}
+		}
 
 		foreach ( $meta_keys as $key ) {
 			if ( empty( $enabled[ $key ] ) ) {
 				continue;
 			}
 			$transform = sanitize_text_field( $transforms[ $key ] ?? 'raw' );
-			$choice    = sanitize_text_field( $attrs[ $key ] ?? '' );
-			if ( '' === $choice ) {
+
+			// Whatever the user typed becomes the Brevo field name (normalised
+			// to Brevo's UPPER_SNAKE rules). Blank falls back to the meta key.
+			$typed = trim( sanitize_text_field( $attrs[ $key ] ?? '' ) );
+			if ( '' === $typed ) {
+				$typed = $key;
+			}
+			$attr_name = $this->suggest_attr_name( $typed );
+			if ( '' === $attr_name ) {
 				continue;
 			}
 
-			if ( '@create' === $choice ) {
-				$attr_name = $this->suggest_attr_name( $key );
-				$result    = $api->create_attribute( $attr_name, $this->transform_to_brevo_type( $transform ) );
-				// A 400 "attribute already exists" is fine — reuse the name.
-				if ( ! is_wp_error( $result ) || false !== stripos( $result->get_error_message(), 'exist' ) ) {
-					$created++;
-				} elseif ( is_wp_error( $result ) ) {
+			// Create the field in Brevo if it doesn't exist yet.
+			if ( ! isset( $existing[ $attr_name ] ) ) {
+				$result = $api->create_attribute( $attr_name, $this->transform_to_brevo_type( $transform ) );
+				if ( is_wp_error( $result ) && false === stripos( $result->get_error_message(), 'exist' ) ) {
 					$this->notify( 'error', sprintf( /* translators: 1: field 2: error */ __( 'Could not create field %1$s: %2$s', 'brevo-contact-sync' ), $attr_name, $result->get_error_message() ) );
+				} else {
+					$existing[ $attr_name ] = true;
+					$created++;
 				}
-				$choice = $attr_name;
 			}
 
 			$mapping[] = array(
 				'meta_key'   => $key,
-				'brevo_attr' => strtoupper( $choice ),
+				'brevo_attr' => $attr_name,
 				'transform'  => $transform,
 			);
 		}
@@ -228,6 +248,115 @@ class BCS_Admin {
 		check_admin_referer( 'bcs_rescan' );
 		BCS_Meta::flush_cache();
 		$this->notify( 'success', __( 'Re-scanned customer meta fields.', 'brevo-contact-sync' ) );
+		wp_safe_redirect( admin_url( 'admin.php?page=brevo-field-mapping' ) );
+		exit;
+	}
+
+	/**
+	 * Download the saved field mapping as a CSV template.
+	 */
+	public function handle_export_mapping() {
+		$this->guard();
+		check_admin_referer( 'bcs_export_mapping' );
+
+		$mapping  = BCS_Sync::get_mapping();
+		$filename = 'brevo-mapping-' . gmdate( 'Ymd' ) . '.csv';
+
+		nocache_headers();
+		header( 'Content-Type: text/csv; charset=utf-8' );
+		header( 'Content-Disposition: attachment; filename=' . $filename );
+
+		$out = fopen( 'php://output', 'w' );
+		fputcsv( $out, array( 'wp_meta_key', 'brevo_field', 'format' ) );
+		foreach ( $mapping as $m ) {
+			fputcsv( $out, array( $m['meta_key'], $m['brevo_attr'], $m['transform'] ) );
+		}
+		fclose( $out ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		exit;
+	}
+
+	/**
+	 * Import a mapping template CSV (replacing the current mapping).
+	 */
+	public function handle_import_mapping() {
+		$this->guard();
+		check_admin_referer( 'bcs_import_mapping' );
+
+		if ( empty( $_FILES['mapping_csv']['tmp_name'] ) || ! is_uploaded_file( $_FILES['mapping_csv']['tmp_name'] ) ) {
+			$this->notify( 'error', __( 'No CSV file uploaded.', 'brevo-contact-sync' ) );
+			wp_safe_redirect( admin_url( 'admin.php?page=brevo-field-mapping' ) );
+			exit;
+		}
+
+		$valid_transforms = array( 'raw', 'number', 'date', 'bool', 'serialized_list' );
+		$rows             = array();
+		$handle           = fopen( $_FILES['mapping_csv']['tmp_name'], 'r' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		if ( false === $handle ) {
+			$this->notify( 'error', __( 'Could not read the uploaded file.', 'brevo-contact-sync' ) );
+			wp_safe_redirect( admin_url( 'admin.php?page=brevo-field-mapping' ) );
+			exit;
+		}
+
+		$line = 0;
+		while ( false !== ( $cols = fgetcsv( $handle, 4096 ) ) ) {
+			$line++;
+			$key   = isset( $cols[0] ) ? trim( sanitize_text_field( $cols[0] ) ) : '';
+			$field = isset( $cols[1] ) ? trim( sanitize_text_field( $cols[1] ) ) : '';
+			$fmt   = isset( $cols[2] ) ? trim( sanitize_text_field( $cols[2] ) ) : 'raw';
+
+			// Skip header row and blanks.
+			if ( 1 === $line && 'wp_meta_key' === strtolower( $key ) ) {
+				continue;
+			}
+			if ( '' === $key || '' === $field ) {
+				continue;
+			}
+			$rows[] = array(
+				'meta_key'   => $key,
+				'brevo_attr' => $this->suggest_attr_name( $field ),
+				'transform'  => in_array( $fmt, $valid_transforms, true ) ? $fmt : 'raw',
+			);
+		}
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+
+		if ( empty( $rows ) ) {
+			$this->notify( 'error', __( 'No valid mapping rows found in the CSV.', 'brevo-contact-sync' ) );
+			wp_safe_redirect( admin_url( 'admin.php?page=brevo-field-mapping' ) );
+			exit;
+		}
+
+		// Create any missing Brevo fields referenced by the template.
+		$api      = new BCS_API();
+		$existing = array();
+		$list     = $api->get_attributes();
+		if ( ! is_wp_error( $list ) ) {
+			foreach ( $list as $a ) {
+				if ( isset( $a['name'] ) ) {
+					$existing[ strtoupper( $a['name'] ) ] = true;
+				}
+			}
+		}
+		$created = 0;
+		foreach ( $rows as $r ) {
+			if ( '' !== $r['brevo_attr'] && ! isset( $existing[ $r['brevo_attr'] ] ) ) {
+				$result = $api->create_attribute( $r['brevo_attr'], $this->transform_to_brevo_type( $r['transform'] ) );
+				if ( ! is_wp_error( $result ) || false !== stripos( $result->get_error_message(), 'exist' ) ) {
+					$existing[ $r['brevo_attr'] ] = true;
+					$created++;
+				}
+			}
+		}
+
+		update_option( BCS_OPTION_MAPPING, $rows );
+		$this->notify(
+			'success',
+			sprintf(
+				/* translators: 1: mapping count 2: created field count */
+				__( 'Imported %1$d mappings. Created %2$d new Brevo field(s).', 'brevo-contact-sync' ),
+				count( $rows ),
+				$created
+			)
+		);
 		wp_safe_redirect( admin_url( 'admin.php?page=brevo-field-mapping' ) );
 		exit;
 	}
@@ -388,13 +517,60 @@ class BCS_Admin {
 				'serialized_list' => __( 'List (decode serialized)', 'brevo-contact-sync' ),
 			);
 			?>
-			<p><?php esc_html_e( 'These are the customer fields found in your WordPress users. Tick the ones to sync, choose (or create) the matching Brevo field, and pick how the value should be formatted. Your key fields are listed first; the rest follow by how many users have them. The contact email (top row) is always sent and can\'t be unchecked.', 'brevo-contact-sync' ); ?></p>
+			<p><?php esc_html_e( 'These are the customer fields found in your WordPress users. Tick the ones to sync, type (or pick) the Brevo field name to import into, and choose how the value is formatted. Your key fields are listed first; the rest follow by how many users have them. The contact email (top row) is always sent and can\'t be unchecked.', 'brevo-contact-sync' ); ?></p>
+			<p class="description"><?php esc_html_e( 'The "Brevo field" box is editable — type any name you want. Names are normalised to Brevo\'s format (UPPER_CASE, no spaces), and a new field is created in Brevo automatically if it doesn\'t exist yet. Start typing to autocomplete from your existing Brevo fields.', 'brevo-contact-sync' ); ?></p>
+
+			<datalist id="bcs-attr-names">
+				<?php foreach ( $attr_names as $name ) : ?>
+					<option value="<?php echo esc_attr( $name ); ?>"></option>
+				<?php endforeach; ?>
+			</datalist>
+
+			<details style="margin:1em 0;">
+				<summary style="cursor:pointer;font-weight:600;">
+					<?php
+					/* translators: %d: number of Brevo fields */
+					echo esc_html( sprintf( __( 'Your Brevo fields (%d) — click to view', 'brevo-contact-sync' ), count( $brevo_attrs ) ) );
+					?>
+				</summary>
+				<table class="widefat striped" style="max-width:520px;margin-top:.5em;">
+					<thead><tr><th><?php esc_html_e( 'Field name', 'brevo-contact-sync' ); ?></th><th><?php esc_html_e( 'Type', 'brevo-contact-sync' ); ?></th><th><?php esc_html_e( 'Category', 'brevo-contact-sync' ); ?></th></tr></thead>
+					<tbody>
+						<?php foreach ( $brevo_attrs as $a ) : ?>
+							<tr>
+								<td><code><?php echo esc_html( strtoupper( $a['name'] ?? '' ) ); ?></code></td>
+								<td><?php echo esc_html( $a['type'] ?? '—' ); ?></td>
+								<td><?php echo esc_html( $a['category'] ?? '' ); ?></td>
+							</tr>
+						<?php endforeach; ?>
+					</tbody>
+				</table>
+				<p class="description"><?php esc_html_e( 'Brevo has no rename for fields. To rename, map to a new name here (it creates the new field), then delete the old one in Brevo under Contacts → Settings → Contact attributes.', 'brevo-contact-sync' ); ?></p>
+			</details>
 
 			<p>
 				<?php $toggle = $show_all ? admin_url( 'admin.php?page=brevo-field-mapping' ) : admin_url( 'admin.php?page=brevo-field-mapping&show_all=1' ); ?>
 				<a class="button" href="<?php echo esc_url( $toggle ); ?>"><?php echo $show_all ? esc_html__( 'Hide technical fields', 'brevo-contact-sync' ) : esc_html__( 'Show all meta fields', 'brevo-contact-sync' ); ?></a>
 				<a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=bcs_rescan' ), 'bcs_rescan' ) ); ?>"><?php esc_html_e( 'Re-scan', 'brevo-contact-sync' ); ?></a>
 			</p>
+
+			<div style="display:flex;gap:1.5em;flex-wrap:wrap;align-items:flex-end;margin:1em 0;padding:1em;background:#f6f7f7;border:1px solid #dcdcde;border-radius:4px;">
+				<div>
+					<strong><?php esc_html_e( 'Mapping templates', 'brevo-contact-sync' ); ?></strong>
+					<p class="description" style="margin:.25em 0 .5em;"><?php esc_html_e( 'Save your current mapping as a CSV, or load one to reuse on another site.', 'brevo-contact-sync' ); ?></p>
+					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline;">
+						<input type="hidden" name="action" value="bcs_export_mapping" />
+						<?php wp_nonce_field( 'bcs_export_mapping' ); ?>
+						<?php submit_button( __( 'Export mapping (CSV)', 'brevo-contact-sync' ), 'secondary', 'submit', false ); ?>
+					</form>
+				</div>
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" enctype="multipart/form-data" style="display:flex;gap:.5em;align-items:center;">
+					<input type="hidden" name="action" value="bcs_import_mapping" />
+					<?php wp_nonce_field( 'bcs_import_mapping' ); ?>
+					<input type="file" name="mapping_csv" accept=".csv,text/csv" required />
+					<?php submit_button( __( 'Import mapping', 'brevo-contact-sync' ), 'secondary', 'submit', false ); ?>
+				</form>
+			</div>
 
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 				<input type="hidden" name="action" value="bcs_save_mapping" />
@@ -440,19 +616,7 @@ class BCS_Admin {
 								<td><span style="color:#666;"><?php echo esc_html( $sample ); ?></span></td>
 								<td><?php echo esc_html( $row['users'] ? number_format_i18n( $row['users'] ) : '—' ); ?></td>
 								<td>
-									<select name="brevo_attr[<?php echo esc_attr( $key ); ?>]">
-										<option value=""><?php esc_html_e( '— ignore —', 'brevo-contact-sync' ); ?></option>
-										<?php $is_create = ( '' !== $cur_attr && ! isset( $attr_names[ $cur_attr ] ) ); ?>
-										<option value="@create" <?php selected( $is_create ); ?>>
-											<?php
-											/* translators: %s: suggested Brevo field name */
-											echo esc_html( sprintf( __( '➕ Create new: %s', 'brevo-contact-sync' ), $suggest ) );
-											?>
-										</option>
-										<?php foreach ( $attr_names as $name ) : ?>
-											<option value="<?php echo esc_attr( $name ); ?>" <?php selected( $cur_attr, $name ); ?>><?php echo esc_html( $name ); ?></option>
-										<?php endforeach; ?>
-									</select>
+									<input type="text" list="bcs-attr-names" name="brevo_attr[<?php echo esc_attr( $key ); ?>]" value="<?php echo esc_attr( $cur_attr ); ?>" placeholder="<?php echo esc_attr( $suggest ); ?>" style="width:200px;" autocomplete="off" />
 								</td>
 								<td>
 									<select name="transform[<?php echo esc_attr( $key ); ?>]">
@@ -537,6 +701,108 @@ class BCS_Admin {
 					<?php submit_button( __( 'Sync all customers to Brevo now', 'brevo-contact-sync' ), 'primary', 'submit', false, $mapped < 1 ? array( 'disabled' => 'disabled' ) : array() ); ?>
 				</form>
 				<p class="description"><?php esc_html_e( 'Sends customers to Brevo in background batches of 500 using Brevo\'s async import. Safe to run repeatedly — existing contacts are updated, not duplicated.', 'brevo-contact-sync' ); ?></p>
+			<?php endif; ?>
+		</div>
+		<?php
+	}
+
+	/**
+	 * Contact Status: look up an email and show its Brevo subscription state.
+	 */
+	public function render_status_page() {
+		$api   = new BCS_API();
+		$email = isset( $_GET['email'] ) ? sanitize_email( wp_unslash( $_GET['email'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		?>
+		<div class="wrap">
+			<h1><?php esc_html_e( 'Contact Status', 'brevo-contact-sync' ); ?></h1>
+			<?php $this->maybe_notice(); ?>
+
+			<?php if ( ! $api->has_key() ) : ?>
+				<div class="notice notice-warning"><p><?php esc_html_e( 'Add your API key on the Connection page first.', 'brevo-contact-sync' ); ?></p></div>
+				</div>
+				<?php
+				return;
+			endif;
+			?>
+			<p><?php esc_html_e( 'Look up a contact in Brevo to see whether they are subscribed or have unsubscribed (email blocklisted).', 'brevo-contact-sync' ); ?></p>
+
+			<form method="get">
+				<input type="hidden" name="page" value="brevo-contact-status" />
+				<input type="email" name="email" value="<?php echo esc_attr( $email ); ?>" class="regular-text" placeholder="customer@example.com" required />
+				<?php submit_button( __( 'Check status', 'brevo-contact-sync' ), 'primary', 'submit', false ); ?>
+			</form>
+
+			<?php
+			if ( '' === $email ) {
+				echo '</div>';
+				return;
+			}
+
+			$contact = $api->get_contact( $email );
+			if ( is_wp_error( $contact ) ) {
+				$code = (int) ( $contact->get_error_data()['status'] ?? 0 );
+				if ( 404 === $code ) {
+					printf( '<div class="notice notice-info" style="margin-top:1em;"><p>%s</p></div>', esc_html( sprintf( /* translators: %s: email */ __( '%s is not in Brevo yet — they have not been synced or imported.', 'brevo-contact-sync' ), $email ) ) );
+				} else {
+					printf( '<div class="notice notice-error" style="margin-top:1em;"><p>%s</p></div>', esc_html( $contact->get_error_message() ) );
+				}
+				echo '</div>';
+				return;
+			}
+
+			$email_blacklisted = ! empty( $contact['emailBlacklisted'] );
+			$sms_blacklisted   = ! empty( $contact['smsBlacklisted'] );
+			$attributes        = isset( $contact['attributes'] ) && is_array( $contact['attributes'] ) ? $contact['attributes'] : array();
+			$list_ids          = isset( $contact['listIds'] ) && is_array( $contact['listIds'] ) ? $contact['listIds'] : array();
+
+			// Resolve list names for friendliness.
+			$list_names = array();
+			$lists      = $api->get_lists();
+			if ( ! is_wp_error( $lists ) ) {
+				$by_id = array();
+				foreach ( $lists as $l ) {
+					$by_id[ (int) $l['id'] ] = $l['name'];
+				}
+				foreach ( $list_ids as $lid ) {
+					$list_names[] = isset( $by_id[ (int) $lid ] ) ? $by_id[ (int) $lid ] : ( '#' . $lid );
+				}
+			}
+			?>
+			<h2 style="margin-top:1.5em;"><?php echo esc_html( $email ); ?></h2>
+			<?php if ( $email_blacklisted ) : ?>
+				<p style="font-size:1.3em;">🚫 <strong style="color:#b32d2e;"><?php esc_html_e( 'Unsubscribed', 'brevo-contact-sync' ); ?></strong> <?php esc_html_e( '— email blocklisted in Brevo. They will not receive email campaigns.', 'brevo-contact-sync' ); ?></p>
+			<?php else : ?>
+				<p style="font-size:1.3em;">✅ <strong style="color:#007017;"><?php esc_html_e( 'Subscribed', 'brevo-contact-sync' ); ?></strong> <?php esc_html_e( '— can receive email campaigns.', 'brevo-contact-sync' ); ?></p>
+			<?php endif; ?>
+
+			<table class="widefat striped" style="max-width:640px;">
+				<tbody>
+					<tr><th style="width:200px;"><?php esc_html_e( 'Email subscription', 'brevo-contact-sync' ); ?></th><td><?php echo $email_blacklisted ? esc_html__( 'Unsubscribed (blocklisted)', 'brevo-contact-sync' ) : esc_html__( 'Subscribed', 'brevo-contact-sync' ); ?></td></tr>
+					<tr><th><?php esc_html_e( 'SMS subscription', 'brevo-contact-sync' ); ?></th><td><?php echo $sms_blacklisted ? esc_html__( 'Blocklisted', 'brevo-contact-sync' ) : esc_html__( 'OK', 'brevo-contact-sync' ); ?></td></tr>
+					<tr><th><?php esc_html_e( 'Lists', 'brevo-contact-sync' ); ?></th><td><?php echo $list_names ? esc_html( implode( ', ', $list_names ) ) : '—'; ?></td></tr>
+					<?php if ( ! empty( $contact['modifiedAt'] ) ) : ?>
+						<tr><th><?php esc_html_e( 'Last modified', 'brevo-contact-sync' ); ?></th><td><?php echo esc_html( $contact['modifiedAt'] ); ?></td></tr>
+					<?php endif; ?>
+				</tbody>
+			</table>
+
+			<?php if ( ! empty( $attributes ) ) : ?>
+				<h3><?php esc_html_e( 'Attributes in Brevo', 'brevo-contact-sync' ); ?></h3>
+				<table class="widefat striped" style="max-width:640px;">
+					<thead><tr><th><?php esc_html_e( 'Field', 'brevo-contact-sync' ); ?></th><th><?php esc_html_e( 'Value', 'brevo-contact-sync' ); ?></th></tr></thead>
+					<tbody>
+						<?php
+						foreach ( $attributes as $k => $v ) {
+							if ( is_array( $v ) ) {
+								$v = implode( ', ', $v );
+							} elseif ( is_bool( $v ) ) {
+								$v = $v ? 'true' : 'false';
+							}
+							printf( '<tr><td><code>%s</code></td><td>%s</td></tr>', esc_html( $k ), esc_html( (string) $v ) );
+						}
+						?>
+					</tbody>
+				</table>
 			<?php endif; ?>
 		</div>
 		<?php
