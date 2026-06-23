@@ -115,6 +115,7 @@ class BCS_Import {
 				'list_id'     => (int) $list_id,
 				'email_col'   => self::guess_email_column( $header ),
 				'col_map'     => self::guess_column_map( $header ),
+				'total'       => self::count_rows( $dest ),
 				'last_msg'    => '',
 			)
 		);
@@ -162,6 +163,32 @@ class BCS_Import {
 			}
 		}
 		return $map;
+	}
+
+	/**
+	 * Read the first few data rows of the staged file for preview.
+	 *
+	 * @param int $limit Max rows.
+	 * @return array[] Array of row arrays (cells).
+	 */
+	public static function get_preview( $limit = 5 ) {
+		$state = self::get_state();
+		if ( empty( $state['file'] ) || ! file_exists( $state['file'] ) ) {
+			return array();
+		}
+		$rows   = array();
+		$handle = fopen( $state['file'], 'r' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		if ( ! $handle ) {
+			return array();
+		}
+		fgetcsv( $handle, 8192 ); // Skip header.
+		$n = 0;
+		while ( $n < $limit && false !== ( $row = fgetcsv( $handle, 8192 ) ) ) {
+			$rows[] = $row;
+			$n++;
+		}
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		return $rows;
 	}
 
 	/* ---------------------------------------------------------------------

@@ -335,67 +335,43 @@ class BCS_Sync {
 			return;
 		}
 
-		// Brevo's import applies one set of lists per call, so bucket users by
-		// whether they should be added to the marketing list.
-		$optin_on   = ! empty( $settings['checkout_optin'] );
-		$list_ids   = self::default_list_ids();
-		$with_list  = array();
-		$no_list    = array();
+		// Build the whole batch and send it in ONE async import call. (We don't
+		// do per-contact upserts here — 500 sequential API calls per batch would
+		// time PHP out before progress is saved. Bulk loads everyone into the
+		// configured list; who actually receives email is governed by Brevo's
+		// global unsubscribe flag, not list membership.)
+		$list_ids = self::default_list_ids();
+		$contacts = array();
 		foreach ( $user_ids as $uid ) {
 			$row = self::build_contact_row( (int) $uid, $include_empty );
-			if ( ! $row ) {
-				continue;
-			}
-			if ( $optin_on && 'yes' !== get_user_meta( (int) $uid, self::OPTIN_META, true ) ) {
-				$no_list[] = $row;
-			} else {
-				$with_list[] = $row;
+			if ( $row ) {
+				$contacts[] = $row;
 			}
 		}
 
-		$api    = new BCS_API();
-		$queued = 0;
-		$failed = 0;
-		$last   = '';
+		// Advance the cursor by the number of users scanned (not just those with
+		// an email), so the bar always reaches 100%.
+		$state['offset'] = $offset + count( $user_ids );
 
-		// Opted-in (or opt-in disabled): fast async bulk import into the list.
-		if ( ! empty( $with_list ) ) {
-			$result = $api->import_contacts( $with_list, $list_ids );
+		if ( ! empty( $contacts ) ) {
+			$result = ( new BCS_API() )->import_contacts( $contacts, $list_ids );
 			if ( is_wp_error( $result ) ) {
-				$failed += count( $with_list );
-				$last    = $result->get_error_message();
+				$state['errors']  += count( $contacts );
+				$state['last_msg'] = $result->get_error_message();
 				self::log( 'Batch import failed at offset ' . $offset . ': ' . $result->get_error_message() );
 			} else {
-				$queued += count( $with_list );
+				$state['processed'] += count( $contacts );
+				$state['last_msg']   = sprintf( /* translators: %d: number of contacts queued */ __( 'Queued %d contacts with Brevo.', 'brevo-contact-sync' ), count( $contacts ) );
 			}
 		}
 
-		// Not opted-in: sync contact data without adding them to the list.
-		// Brevo's import endpoint requires a list, so use per-contact upsert here.
-		foreach ( $no_list as $row ) {
-			$result = $api->upsert_contact( $row['email'], isset( $row['attributes'] ) ? $row['attributes'] : array(), array() );
-			if ( is_wp_error( $result ) ) {
-				$failed++;
-				$last = $result->get_error_message();
-			} else {
-				$queued++;
-			}
-		}
+		// Persist progress immediately so the UI reflects each batch.
+		update_option( BCS_OPTION_SYNC, $state );
 
-		$state['processed'] += $queued;
-		$state['errors']    += $failed;
-		$state['last_msg']   = $failed
-			? $last
-			: sprintf( /* translators: %d: number of contacts queued */ __( 'Queued %d contacts with Brevo.', 'brevo-contact-sync' ), $queued );
-
-		$state['offset'] = $offset + self::BATCH_SIZE;
-
-		if ( $state['offset'] >= (int) $state['total'] ) {
+		if ( $state['offset'] >= (int) $state['total'] || count( $user_ids ) < self::BATCH_SIZE ) {
 			self::finish_sync( $state );
 			return;
 		}
-
-		update_option( BCS_OPTION_SYNC, $state );
 
 		// Chain the next batch.
 		wp_schedule_single_event( time() + 2, BCS_CRON_BATCH );

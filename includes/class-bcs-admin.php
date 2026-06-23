@@ -814,31 +814,57 @@ class BCS_Admin {
 
 			// ---- Staged: confirm column mapping ----
 			if ( ! empty( $state['staged'] ) ) {
+				$preview     = BCS_Import::get_preview( 5 );
+				$first_row   = ! empty( $preview ) ? $preview[0] : array();
+				$total_guess = BCS_Import::get_state()['total'] ?? 0;
 				?>
 				<p>
 					<strong><?php esc_html_e( 'File uploaded.', 'brevo-contact-sync' ); ?></strong>
 					<?php echo esc_html( 'unsubscribed' === $state['status_mode'] ? __( 'These contacts will be marked UNSUBSCRIBED (blocklisted) in Brevo.', 'brevo-contact-sync' ) : __( 'These contacts will be imported as SUBSCRIBED.', 'brevo-contact-sync' ) ); ?>
 				</p>
-				<p><?php esc_html_e( 'Pick the email column and map any other columns to Brevo fields (leave blank to skip a column).', 'brevo-contact-sync' ); ?></p>
+				<p><?php esc_html_e( 'Pick the email column and map any other columns to Brevo fields (leave blank to skip a column). The "Example" column shows a value from the first row so you can confirm you picked the right ones.', 'brevo-contact-sync' ); ?></p>
 				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 					<input type="hidden" name="action" value="bcs_import_start" />
 					<?php wp_nonce_field( 'bcs_import_start' ); ?>
-					<table class="widefat striped" style="max-width:760px;">
+					<table class="widefat striped" style="max-width:900px;">
 						<thead><tr>
 							<th><?php esc_html_e( 'CSV column', 'brevo-contact-sync' ); ?></th>
+							<th><?php esc_html_e( 'Example', 'brevo-contact-sync' ); ?></th>
 							<th><?php esc_html_e( 'Email?', 'brevo-contact-sync' ); ?></th>
 							<th><?php esc_html_e( 'Import to Brevo field', 'brevo-contact-sync' ); ?></th>
 						</tr></thead>
 						<tbody>
-							<?php foreach ( (array) $state['header'] as $i => $col ) : ?>
+							<?php
+							foreach ( (array) $state['header'] as $i => $col ) :
+								$sample = isset( $first_row[ $i ] ) ? (string) $first_row[ $i ] : '';
+								if ( strlen( $sample ) > 40 ) {
+									$sample = substr( $sample, 0, 40 ) . '…';
+								}
+								?>
 								<tr>
 									<td><code><?php echo esc_html( $col ); ?></code></td>
+									<td><span style="color:#666;"><?php echo esc_html( $sample ); ?></span></td>
 									<td><input type="radio" name="email_col" value="<?php echo esc_attr( $i ); ?>" <?php checked( (int) $state['email_col'], (int) $i ); ?> /></td>
 									<td><input type="text" name="col_map[<?php echo esc_attr( $i ); ?>]" value="<?php echo esc_attr( $state['col_map'][ $i ] ?? '' ); ?>" placeholder="<?php esc_attr_e( '(skip)', 'brevo-contact-sync' ); ?>" style="width:200px;" /></td>
 								</tr>
 							<?php endforeach; ?>
 						</tbody>
 					</table>
+
+					<?php if ( ! empty( $preview ) ) : ?>
+						<h3><?php esc_html_e( 'Preview (first rows)', 'brevo-contact-sync' ); ?> <span class="description" style="font-weight:normal;"><?php echo esc_html( sprintf( /* translators: %s: row count */ __( '~%s rows total', 'brevo-contact-sync' ), number_format_i18n( (int) $total_guess ) ) ); ?></span></h3>
+						<div style="overflow:auto;max-width:100%;">
+							<table class="widefat striped" style="font-size:12px;">
+								<thead><tr><?php foreach ( (array) $state['header'] as $col ) : ?><th><?php echo esc_html( $col ); ?></th><?php endforeach; ?></tr></thead>
+								<tbody>
+									<?php foreach ( $preview as $prow ) : ?>
+										<tr><?php foreach ( (array) $state['header'] as $i => $col ) : ?><td><?php echo esc_html( isset( $prow[ $i ] ) ? (string) $prow[ $i ] : '' ); ?></td><?php endforeach; ?></tr>
+									<?php endforeach; ?>
+								</tbody>
+							</table>
+						</div>
+					<?php endif; ?>
+
 					<p>
 						<?php submit_button( __( 'Start Import', 'brevo-contact-sync' ), 'primary', 'submit', false ); ?>
 					</p>
