@@ -11,7 +11,7 @@
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       brevo-contact-sync
  *
- * WP Pusher: install from https://github.com/andyfreed/brevo-plugin (branch master, no subdirectory)
+ * WP Pusher: install from https://github.com/andyfreed/brevo-plugin (branch main, no subdirectory)
  *
  * @package BrevoContactSync
  */
