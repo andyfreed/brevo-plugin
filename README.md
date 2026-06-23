@@ -83,6 +83,37 @@ flag stored as an attribute as well.
 
 ---
 
+## Migrating from Mailchimp (Import Contacts)
+
+**Brevo Sync → Import Contacts** bulk-loads a CSV (e.g. a Mailchimp export) into
+a Brevo list, in background batches that scale to large files.
+
+How subscription status works in Brevo — the important bit:
+
+- Subscribe/unsubscribe is a **global per-contact flag** (`emailBlacklisted`),
+  **not** a list. Once a contact is unsubscribed, Brevo never emails them from any
+  list.
+- So you don't need separate lists for status. Import everyone into one list; the
+  unsubscribed ones are flagged.
+
+Workflow for a Mailchimp move:
+
+1. Export your **subscribed** and **unsubscribed** audiences from Mailchimp (two CSVs).
+2. **Import Contacts** → upload the subscribed file, choose **Subscribed**, pick the
+   target list → map the email column (auto-detected) and any others → **Start**.
+3. Repeat for the unsubscribed file, choosing **Unsubscribed** — every row is
+   flagged `emailBlacklisted` so those people are clearly marked and never emailed.
+4. Check any contact on the **Contact Status** page to confirm ✅/🚫.
+
+**Overlap with WooCommerce customers is safe.** Brevo dedupes by email, and this
+plugin's WooCommerce sync **never changes the subscribe/unsubscribe flag** — it only
+writes attributes (and optional list membership). The importer only sets the flag for
+the *unsubscribed* file. So a person who is both a customer and on your Mailchimp
+unsubscribe list ends up as one contact: data kept current, status = unsubscribed,
+never emailed.
+
+---
+
 ## Architecture
 
 | File | Responsibility |
@@ -91,6 +122,7 @@ flag stored as an attribute as well.
 | `includes/class-bcs-api.php` | Brevo v3 client: attributes, lists, upsert, async import |
 | `includes/class-bcs-meta.php` | Detect customer meta, filter noise, decode/transform values |
 | `includes/class-bcs-sync.php` | Build attributes, real-time push, batched bulk sync |
+| `includes/class-bcs-import.php` | Background CSV contact importer (subscribe/unsubscribe) |
 | `includes/class-bcs-admin.php` | Connection / Field Mapping / Bulk Sync screens |
 | `uninstall.php` | Removes options, transients, scheduled jobs |
 

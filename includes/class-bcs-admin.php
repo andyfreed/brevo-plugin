@@ -24,6 +24,9 @@ class BCS_Admin {
 		add_action( 'admin_post_bcs_rescan', array( $this, 'handle_rescan' ) );
 		add_action( 'admin_post_bcs_export_mapping', array( $this, 'handle_export_mapping' ) );
 		add_action( 'admin_post_bcs_import_mapping', array( $this, 'handle_import_mapping' ) );
+		add_action( 'admin_post_bcs_import_upload', array( $this, 'handle_import_upload' ) );
+		add_action( 'admin_post_bcs_import_start', array( $this, 'handle_import_start' ) );
+		add_action( 'admin_post_bcs_import_cancel', array( $this, 'handle_import_cancel' ) );
 		add_filter( 'plugin_action_links_' . plugin_basename( BCS_PLUGIN_FILE ), array( $this, 'action_links' ) );
 	}
 
@@ -53,6 +56,7 @@ class BCS_Admin {
 		add_submenu_page( 'brevo-contact-sync', __( 'Connection', 'brevo-contact-sync' ), __( 'Connection', 'brevo-contact-sync' ), 'manage_options', 'brevo-contact-sync', array( $this, 'render_settings_page' ) );
 		add_submenu_page( 'brevo-contact-sync', __( 'Field Mapping', 'brevo-contact-sync' ), __( 'Field Mapping', 'brevo-contact-sync' ), 'manage_options', 'brevo-field-mapping', array( $this, 'render_mapping_page' ) );
 		add_submenu_page( 'brevo-contact-sync', __( 'Bulk Sync', 'brevo-contact-sync' ), __( 'Bulk Sync', 'brevo-contact-sync' ), 'manage_options', 'brevo-bulk-sync', array( $this, 'render_sync_page' ) );
+		add_submenu_page( 'brevo-contact-sync', __( 'Import Contacts', 'brevo-contact-sync' ), __( 'Import Contacts', 'brevo-contact-sync' ), 'manage_options', 'brevo-import-contacts', array( $this, 'render_import_page' ) );
 		add_submenu_page( 'brevo-contact-sync', __( 'Contact Status', 'brevo-contact-sync' ), __( 'Contact Status', 'brevo-contact-sync' ), 'manage_options', 'brevo-contact-status', array( $this, 'render_status_page' ) );
 	}
 
@@ -358,6 +362,57 @@ class BCS_Admin {
 			)
 		);
 		wp_safe_redirect( admin_url( 'admin.php?page=brevo-field-mapping' ) );
+		exit;
+	}
+
+	/* ---- Contact CSV importer (Mailchimp → Brevo) ---- */
+
+	public function handle_import_upload() {
+		$this->guard();
+		check_admin_referer( 'bcs_import_upload' );
+
+		$status = ( 'unsubscribed' === ( $_POST['status_mode'] ?? '' ) ) ? 'unsubscribed' : 'subscribed';
+		$list   = (int) ( $_POST['list_id'] ?? 0 );
+		if ( ! $list ) {
+			$this->notify( 'error', __( 'Choose a target Brevo list.', 'brevo-contact-sync' ) );
+			wp_safe_redirect( admin_url( 'admin.php?page=brevo-import-contacts' ) );
+			exit;
+		}
+
+		$result = BCS_Import::stage_upload( $_FILES['contacts_csv'] ?? array(), $status, $list );
+		if ( is_wp_error( $result ) ) {
+			$this->notify( 'error', $result->get_error_message() );
+		}
+		wp_safe_redirect( admin_url( 'admin.php?page=brevo-import-contacts' ) );
+		exit;
+	}
+
+	public function handle_import_start() {
+		$this->guard();
+		check_admin_referer( 'bcs_import_start' );
+
+		$email_col = isset( $_POST['email_col'] ) ? (int) $_POST['email_col'] : -1;
+		$col_map   = array();
+		foreach ( (array) ( $_POST['col_map'] ?? array() ) as $i => $field ) {
+			$col_map[ (int) $i ] = sanitize_text_field( wp_unslash( $field ) );
+		}
+
+		$result = BCS_Import::start( $email_col, $col_map );
+		if ( is_wp_error( $result ) ) {
+			$this->notify( 'error', $result->get_error_message() );
+		} else {
+			$this->notify( 'success', __( 'Import started — it runs in the background.', 'brevo-contact-sync' ) );
+		}
+		wp_safe_redirect( admin_url( 'admin.php?page=brevo-import-contacts' ) );
+		exit;
+	}
+
+	public function handle_import_cancel() {
+		$this->guard();
+		check_admin_referer( 'bcs_import_cancel' );
+		BCS_Import::cancel();
+		$this->notify( 'success', __( 'Import cancelled and file removed.', 'brevo-contact-sync' ) );
+		wp_safe_redirect( admin_url( 'admin.php?page=brevo-import-contacts' ) );
 		exit;
 	}
 
@@ -702,6 +757,143 @@ class BCS_Admin {
 				</form>
 				<p class="description"><?php esc_html_e( 'Sends customers to Brevo in background batches of 500 using Brevo\'s async import. Safe to run repeatedly — existing contacts are updated, not duplicated.', 'brevo-contact-sync' ); ?></p>
 			<?php endif; ?>
+		</div>
+		<?php
+	}
+
+	/**
+	 * Import Contacts: upload a CSV (e.g. Mailchimp export) and import to Brevo.
+	 */
+	public function render_import_page() {
+		$api   = new BCS_API();
+		$state = BCS_Import::get_state();
+		?>
+		<div class="wrap">
+			<h1><?php esc_html_e( 'Import Contacts', 'brevo-contact-sync' ); ?></h1>
+			<?php $this->maybe_notice(); ?>
+
+			<?php
+			if ( ! $api->has_key() ) {
+				echo '<div class="notice notice-warning"><p>' . esc_html__( 'Add your API key on the Connection page first.', 'brevo-contact-sync' ) . '</p></div></div>';
+				return;
+			}
+
+			// ---- Running: progress ----
+			if ( ! empty( $state['running'] ) ) {
+				$total = (int) $state['total'];
+				$done  = (int) $state['processed'] + (int) $state['errors'];
+				$pct   = $total ? min( 100, round( $done / $total * 100 ) ) : 0;
+				?>
+				<meta http-equiv="refresh" content="5" />
+				<p><strong><?php echo esc_html( 'unsubscribed' === $state['status_mode'] ? __( 'Importing as UNSUBSCRIBED', 'brevo-contact-sync' ) : __( 'Importing as SUBSCRIBED', 'brevo-contact-sync' ) ); ?></strong></p>
+				<div style="max-width:600px;background:#e5e5e5;border-radius:4px;overflow:hidden;height:24px;margin:1em 0;">
+					<div style="width:<?php echo esc_attr( $pct ); ?>%;background:#2271b1;height:24px;color:#fff;text-align:center;line-height:24px;font-size:12px;"><?php echo esc_html( $pct . '%' ); ?></div>
+				</div>
+				<p>
+					<?php
+					printf(
+						/* translators: 1: processed 2: total 3: errors */
+						esc_html__( 'Imported %1$s of %2$s. Errors: %3$d.', 'brevo-contact-sync' ),
+						esc_html( number_format_i18n( $state['processed'] ) ),
+						esc_html( number_format_i18n( $total ) ),
+						(int) $state['errors']
+					);
+					?>
+					<br /><em><?php echo esc_html( $state['last_msg'] ); ?></em>
+				</p>
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+					<input type="hidden" name="action" value="bcs_import_cancel" />
+					<?php wp_nonce_field( 'bcs_import_cancel' ); ?>
+					<?php submit_button( __( 'Cancel Import', 'brevo-contact-sync' ), 'delete', 'submit', false ); ?>
+				</form>
+				<p class="description"><?php esc_html_e( 'Runs in the background; this page auto-refreshes. Brevo finishes processing each batch shortly after it is queued.', 'brevo-contact-sync' ); ?></p>
+				</div>
+				<?php
+				return;
+			}
+
+			// ---- Staged: confirm column mapping ----
+			if ( ! empty( $state['staged'] ) ) {
+				?>
+				<p>
+					<strong><?php esc_html_e( 'File uploaded.', 'brevo-contact-sync' ); ?></strong>
+					<?php echo esc_html( 'unsubscribed' === $state['status_mode'] ? __( 'These contacts will be marked UNSUBSCRIBED (blocklisted) in Brevo.', 'brevo-contact-sync' ) : __( 'These contacts will be imported as SUBSCRIBED.', 'brevo-contact-sync' ) ); ?>
+				</p>
+				<p><?php esc_html_e( 'Pick the email column and map any other columns to Brevo fields (leave blank to skip a column).', 'brevo-contact-sync' ); ?></p>
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+					<input type="hidden" name="action" value="bcs_import_start" />
+					<?php wp_nonce_field( 'bcs_import_start' ); ?>
+					<table class="widefat striped" style="max-width:760px;">
+						<thead><tr>
+							<th><?php esc_html_e( 'CSV column', 'brevo-contact-sync' ); ?></th>
+							<th><?php esc_html_e( 'Email?', 'brevo-contact-sync' ); ?></th>
+							<th><?php esc_html_e( 'Import to Brevo field', 'brevo-contact-sync' ); ?></th>
+						</tr></thead>
+						<tbody>
+							<?php foreach ( (array) $state['header'] as $i => $col ) : ?>
+								<tr>
+									<td><code><?php echo esc_html( $col ); ?></code></td>
+									<td><input type="radio" name="email_col" value="<?php echo esc_attr( $i ); ?>" <?php checked( (int) $state['email_col'], (int) $i ); ?> /></td>
+									<td><input type="text" name="col_map[<?php echo esc_attr( $i ); ?>]" value="<?php echo esc_attr( $state['col_map'][ $i ] ?? '' ); ?>" placeholder="<?php esc_attr_e( '(skip)', 'brevo-contact-sync' ); ?>" style="width:200px;" /></td>
+								</tr>
+							<?php endforeach; ?>
+						</tbody>
+					</table>
+					<p>
+						<?php submit_button( __( 'Start Import', 'brevo-contact-sync' ), 'primary', 'submit', false ); ?>
+					</p>
+				</form>
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+					<input type="hidden" name="action" value="bcs_import_cancel" />
+					<?php wp_nonce_field( 'bcs_import_cancel' ); ?>
+					<?php submit_button( __( 'Discard file', 'brevo-contact-sync' ), 'secondary', 'submit', false ); ?>
+				</form>
+				</div>
+				<?php
+				return;
+			}
+
+			// ---- Idle: upload form ----
+			$lists = $api->get_lists();
+			if ( ! empty( $state['last_msg'] ) ) {
+				echo '<p><em>' . esc_html( $state['last_msg'] ) . '</em></p>';
+			}
+			?>
+			<p><?php esc_html_e( 'Import a CSV of contacts (e.g. a Mailchimp export) into a Brevo list. Import your subscribed and unsubscribed exports separately — set the status for each file below. Unsubscribed contacts are flagged in Brevo and never emailed.', 'brevo-contact-sync' ); ?></p>
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" enctype="multipart/form-data">
+				<input type="hidden" name="action" value="bcs_import_upload" />
+				<?php wp_nonce_field( 'bcs_import_upload' ); ?>
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row"><?php esc_html_e( 'CSV file', 'brevo-contact-sync' ); ?></th>
+						<td><input type="file" name="contacts_csv" accept=".csv,text/csv" required /></td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'These contacts are', 'brevo-contact-sync' ); ?></th>
+						<td>
+							<label style="margin-right:1.5em;"><input type="radio" name="status_mode" value="subscribed" checked /> <?php esc_html_e( 'Subscribed', 'brevo-contact-sync' ); ?></label>
+							<label><input type="radio" name="status_mode" value="unsubscribed" /> <?php esc_html_e( 'Unsubscribed (blocklist in Brevo)', 'brevo-contact-sync' ); ?></label>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Add to Brevo list', 'brevo-contact-sync' ); ?></th>
+						<td>
+							<?php if ( ! is_wp_error( $lists ) && ! empty( $lists ) ) : ?>
+								<select name="list_id" required>
+									<option value=""><?php esc_html_e( '— select a list —', 'brevo-contact-sync' ); ?></option>
+									<?php foreach ( $lists as $list ) : ?>
+										<option value="<?php echo esc_attr( $list['id'] ); ?>"><?php echo esc_html( $list['name'] . ' (' . ( $list['totalSubscribers'] ?? 0 ) . ')' ); ?></option>
+									<?php endforeach; ?>
+								</select>
+							<?php else : ?>
+								<input type="number" name="list_id" class="small-text" required />
+								<p class="description"><?php esc_html_e( 'Create a list in Brevo (Contacts → Lists) and enter its ID.', 'brevo-contact-sync' ); ?></p>
+							<?php endif; ?>
+						</td>
+					</tr>
+				</table>
+				<?php submit_button( __( 'Upload &amp; preview columns', 'brevo-contact-sync' ) ); ?>
+			</form>
 		</div>
 		<?php
 	}

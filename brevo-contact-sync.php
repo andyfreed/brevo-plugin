@@ -3,7 +3,7 @@
  * Plugin Name:       BHFE Brevo Plugin
  * Plugin URI:        https://github.com/andyfreed/brevo-plugin
  * Description:       Pushes WooCommerce customers and their custom user-meta fields to Brevo as contact attributes. Auto-detects your customer meta, lets you map it to Brevo custom fields, and syncs in real time + in bulk.
- * Version:           2.2.0
+ * Version:           2.3.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            BHFE
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'BCS_VERSION', '2.2.0' );
+define( 'BCS_VERSION', '2.3.0' );
 define( 'BCS_PLUGIN_FILE', __FILE__ );
 define( 'BCS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'BCS_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -30,13 +30,16 @@ define( 'BCS_OPTION_API_KEY', 'bcs_api_key' );      // string
 define( 'BCS_OPTION_SETTINGS', 'bcs_settings' );    // array: default_list_id, realtime, last_full_sync
 define( 'BCS_OPTION_MAPPING', 'bcs_field_mapping' ); // array of { meta_key, brevo_attr, transform }
 define( 'BCS_OPTION_SYNC', 'bcs_sync_state' );      // array: running, offset, total, processed, errors, list_id
+define( 'BCS_OPTION_IMPORT', 'bcs_import_state' );  // array: CSV import job state
 
-// Cron hook for batched bulk sync.
-define( 'BCS_CRON_BATCH', 'bcs_process_batch' );
+// Cron hooks.
+define( 'BCS_CRON_BATCH', 'bcs_process_batch' );    // WooCommerce → Brevo bulk sync
+define( 'BCS_CRON_IMPORT', 'bcs_process_import' );  // CSV contact import
 
 require_once BCS_PLUGIN_DIR . 'includes/class-bcs-api.php';
 require_once BCS_PLUGIN_DIR . 'includes/class-bcs-meta.php';
 require_once BCS_PLUGIN_DIR . 'includes/class-bcs-sync.php';
+require_once BCS_PLUGIN_DIR . 'includes/class-bcs-import.php';
 require_once BCS_PLUGIN_DIR . 'includes/class-bcs-checkout.php';
 require_once BCS_PLUGIN_DIR . 'includes/class-bcs-admin.php';
 
@@ -63,6 +66,7 @@ register_activation_hook( __FILE__, 'bcs_activate' );
  */
 function bcs_deactivate() {
 	wp_clear_scheduled_hook( BCS_CRON_BATCH );
+	wp_clear_scheduled_hook( BCS_CRON_IMPORT );
 }
 register_deactivation_hook( __FILE__, 'bcs_deactivate' );
 
@@ -70,8 +74,9 @@ register_deactivation_hook( __FILE__, 'bcs_deactivate' );
  * Boot.
  */
 function bcs_init() {
-	// Background batch processor (registered everywhere so WP-Cron can fire it).
+	// Background processors (registered everywhere so WP-Cron can fire them).
 	add_action( BCS_CRON_BATCH, array( 'BCS_Sync', 'run_batch' ) );
+	add_action( BCS_CRON_IMPORT, array( 'BCS_Import', 'run_batch' ) );
 
 	// Real-time event hooks.
 	BCS_Sync::register_event_hooks();
