@@ -323,11 +323,9 @@ class BCS_Sync {
 			)
 		);
 
-		// Kick off the first batch right away.
-		if ( ! wp_next_scheduled( BCS_CRON_BATCH ) ) {
-			wp_schedule_single_event( time(), BCS_CRON_BATCH );
-		}
-		spawn_cron();
+		// Kick off the first batch right away (loopback + cron fallback).
+		delete_transient( 'bcs_batch_lock' );
+		self::kick( 'bcs_run_batch', BCS_CRON_BATCH );
 		return true;
 	}
 
@@ -336,6 +334,7 @@ class BCS_Sync {
 	 */
 	public static function cancel_full_sync() {
 		wp_clear_scheduled_hook( BCS_CRON_BATCH );
+		delete_transient( 'bcs_batch_lock' );
 		$state            = self::get_state();
 		$state['running'] = 0;
 		$state['last_msg'] = __( 'Cancelled.', 'brevo-contact-sync' );
@@ -351,6 +350,11 @@ class BCS_Sync {
 		if ( empty( $state['running'] ) ) {
 			return;
 		}
+		// Prevent overlapping runs (loopback + cron could both fire).
+		if ( get_transient( 'bcs_batch_lock' ) ) {
+			return;
+		}
+		set_transient( 'bcs_batch_lock', 1, 120 );
 
 		global $wpdb;
 		$settings      = self::get_settings();
@@ -402,15 +406,71 @@ class BCS_Sync {
 
 		// Persist progress immediately so the UI reflects each batch.
 		update_option( BCS_OPTION_SYNC, $state );
+		delete_transient( 'bcs_batch_lock' );
 
 		if ( $state['offset'] >= (int) $state['total'] || count( $user_ids ) < self::BATCH_SIZE ) {
 			self::finish_sync( $state );
 			return;
 		}
 
-		// Chain the next batch.
-		wp_schedule_single_event( time() + 2, BCS_CRON_BATCH );
-		spawn_cron();
+		// Continue with the next batch immediately (loopback), with a cron fallback.
+		self::kick( 'bcs_run_batch', BCS_CRON_BATCH );
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Self-continuing background runner (loopback + cron fallback)
+	 * ------------------------------------------------------------------- */
+
+	/**
+	 * Token authorising loopback requests (no user session in a loopback).
+	 *
+	 * @return string
+	 */
+	public static function loopback_token() {
+		$token = get_option( 'bcs_loopback_token' );
+		if ( ! $token ) {
+			$token = wp_generate_password( 24, false );
+			update_option( 'bcs_loopback_token', $token, false );
+		}
+		return $token;
+	}
+
+	/**
+	 * Trigger the next batch via a non-blocking loopback request, and schedule
+	 * a cron event as a fallback in case loopback HTTP is blocked.
+	 *
+	 * @param string $ajax_action admin-ajax action name.
+	 * @param string $cron_hook   Cron hook to use as fallback.
+	 */
+	public static function kick( $ajax_action, $cron_hook ) {
+		if ( ! wp_next_scheduled( $cron_hook ) ) {
+			wp_schedule_single_event( time() + 45, $cron_hook );
+		}
+		wp_remote_post(
+			admin_url( 'admin-ajax.php' ),
+			array(
+				'timeout'   => 0.01,
+				'blocking'  => false,
+				'sslverify' => false,
+				'body'      => array(
+					'action' => $ajax_action,
+					'token'  => self::loopback_token(),
+				),
+			)
+		);
+	}
+
+	/**
+	 * AJAX entry point for the loopback runner (bulk sync).
+	 */
+	public static function ajax_run_batch() {
+		if ( ! isset( $_POST['token'] ) || ! hash_equals( self::loopback_token(), sanitize_text_field( wp_unslash( $_POST['token'] ) ) ) ) {
+			wp_die( '', '', array( 'response' => 403 ) );
+		}
+		ignore_user_abort( true );
+		@set_time_limit( 0 ); // phpcs:ignore
+		self::run_batch();
+		wp_die( '', '', array( 'response' => 200 ) );
 	}
 
 	/**
@@ -432,6 +492,7 @@ class BCS_Sync {
 		$settings['last_full_sync'] = current_time( 'mysql' );
 		update_option( BCS_OPTION_SETTINGS, $settings );
 
+		delete_transient( 'bcs_batch_lock' );
 		wp_clear_scheduled_hook( BCS_CRON_BATCH );
 	}
 

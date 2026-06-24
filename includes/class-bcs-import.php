@@ -254,10 +254,8 @@ class BCS_Import {
 		$state['last_msg']  = __( 'Starting…', 'brevo-contact-sync' );
 		self::save_state( $state );
 
-		if ( ! wp_next_scheduled( BCS_CRON_IMPORT ) ) {
-			wp_schedule_single_event( time(), BCS_CRON_IMPORT );
-		}
-		spawn_cron();
+		delete_transient( 'bcs_import_lock' );
+		BCS_Sync::kick( 'bcs_run_import', BCS_CRON_IMPORT );
 		return true;
 	}
 
@@ -285,6 +283,7 @@ class BCS_Import {
 	 */
 	public static function cancel() {
 		wp_clear_scheduled_hook( BCS_CRON_IMPORT );
+		delete_transient( 'bcs_import_lock' );
 		self::cleanup_file();
 		delete_option( BCS_OPTION_IMPORT );
 	}
@@ -312,6 +311,10 @@ class BCS_Import {
 		if ( empty( $state['running'] ) || empty( $state['file'] ) || ! file_exists( $state['file'] ) ) {
 			return;
 		}
+		if ( get_transient( 'bcs_import_lock' ) ) {
+			return;
+		}
+		set_transient( 'bcs_import_lock', 1, 120 );
 
 		$handle = fopen( $state['file'], 'r' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		if ( ! $handle ) {
@@ -378,6 +381,7 @@ class BCS_Import {
 		}
 
 		$state['offset'] = $new_offset;
+		delete_transient( 'bcs_import_lock' );
 
 		if ( $eof || 0 === $read ) {
 			self::finish( $state );
@@ -385,8 +389,20 @@ class BCS_Import {
 		}
 
 		self::save_state( $state );
-		wp_schedule_single_event( time() + 2, BCS_CRON_IMPORT );
-		spawn_cron();
+		BCS_Sync::kick( 'bcs_run_import', BCS_CRON_IMPORT );
+	}
+
+	/**
+	 * AJAX entry point for the loopback runner (CSV import).
+	 */
+	public static function ajax_run_batch() {
+		if ( ! isset( $_POST['token'] ) || ! hash_equals( BCS_Sync::loopback_token(), sanitize_text_field( wp_unslash( $_POST['token'] ) ) ) ) {
+			wp_die( '', '', array( 'response' => 403 ) );
+		}
+		ignore_user_abort( true );
+		@set_time_limit( 0 ); // phpcs:ignore
+		self::run_batch();
+		wp_die( '', '', array( 'response' => 200 ) );
 	}
 
 	/**
@@ -404,6 +420,7 @@ class BCS_Import {
 			'unsubscribed' === $state['status_mode'] ? __( 'unsubscribed', 'brevo-contact-sync' ) : __( 'subscribed', 'brevo-contact-sync' )
 		);
 		self::save_state( $state );
+		delete_transient( 'bcs_import_lock' );
 		wp_clear_scheduled_hook( BCS_CRON_IMPORT );
 		self::cleanup_file();
 	}

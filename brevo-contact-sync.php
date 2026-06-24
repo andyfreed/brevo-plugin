@@ -3,7 +3,7 @@
  * Plugin Name:       BHFE Brevo Plugin
  * Plugin URI:        https://github.com/andyfreed/brevo-plugin
  * Description:       Pushes WooCommerce customers and their custom user-meta fields to Brevo as contact attributes. Auto-detects your customer meta, lets you map it to Brevo custom fields, and syncs in real time + in bulk.
- * Version:           2.4.1
+ * Version:           2.5.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            BHFE
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'BCS_VERSION', '2.4.1' );
+define( 'BCS_VERSION', '2.5.0' );
 define( 'BCS_PLUGIN_FILE', __FILE__ );
 define( 'BCS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'BCS_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -77,6 +77,12 @@ function bcs_init() {
 	// Background processors (registered everywhere so WP-Cron can fire them).
 	add_action( BCS_CRON_BATCH, array( 'BCS_Sync', 'run_batch' ) );
 	add_action( BCS_CRON_IMPORT, array( 'BCS_Import', 'run_batch' ) );
+
+	// Loopback runners so jobs self-continue without relying on site traffic.
+	add_action( 'wp_ajax_bcs_run_batch', array( 'BCS_Sync', 'ajax_run_batch' ) );
+	add_action( 'wp_ajax_nopriv_bcs_run_batch', array( 'BCS_Sync', 'ajax_run_batch' ) );
+	add_action( 'wp_ajax_bcs_run_import', array( 'BCS_Import', 'ajax_run_batch' ) );
+	add_action( 'wp_ajax_nopriv_bcs_run_import', array( 'BCS_Import', 'ajax_run_batch' ) );
 
 	// Real-time event hooks.
 	BCS_Sync::register_event_hooks();
