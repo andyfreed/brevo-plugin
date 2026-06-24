@@ -214,8 +214,9 @@ class BCS_Import {
 		if ( $email_col < 0 ) {
 			return new WP_Error( 'bcs_no_email', __( 'Choose which column holds the email address.', 'brevo-contact-sync' ) );
 		}
-		if ( empty( $state['list_id'] ) ) {
-			return new WP_Error( 'bcs_no_list', __( 'A target Brevo list is required.', 'brevo-contact-sync' ) );
+		$list_error = BCS_Sync::validate_list_or_error( $api, $state['list_id'] );
+		if ( $list_error ) {
+			return $list_error;
 		}
 
 		// Normalise mapped field names and create any that don't exist in Brevo.

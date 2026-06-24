@@ -147,6 +147,16 @@ class BCS_API {
 	}
 
 	/**
+	 * Fetch a single list by ID (used to validate a configured list exists).
+	 *
+	 * @param int $list_id List ID.
+	 * @return array|WP_Error List data, or WP_Error (404 if it doesn't exist).
+	 */
+	public function get_list( $list_id ) {
+		return $this->request( 'GET', '/contacts/lists/' . (int) $list_id );
+	}
+
+	/**
 	 * Fetch contact lists.
 	 *
 	 * @return array|WP_Error

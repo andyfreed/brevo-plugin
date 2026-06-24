@@ -55,6 +55,40 @@ class BCS_Sync {
 	}
 
 	/**
+	 * Check a Brevo list exists; return a helpful WP_Error if not.
+	 *
+	 * @param BCS_API $api     API client.
+	 * @param int     $list_id List ID to validate.
+	 * @return WP_Error|null Null if the list is valid.
+	 */
+	public static function validate_list_or_error( BCS_API $api, $list_id ) {
+		$list_id = (int) $list_id;
+		if ( $list_id < 1 ) {
+			return new WP_Error( 'bcs_no_list', __( 'Choose a Brevo list on the Connection page first — Brevo requires a target list.', 'brevo-contact-sync' ) );
+		}
+		if ( ! is_wp_error( $api->get_list( $list_id ) ) ) {
+			return null;
+		}
+
+		// Build a hint listing the lists that DO exist.
+		$lists = $api->get_lists();
+		if ( ! is_wp_error( $lists ) && ! empty( $lists ) ) {
+			$pairs = array();
+			foreach ( $lists as $l ) {
+				$pairs[] = '#' . $l['id'] . ' ' . $l['name'];
+			}
+			$hint = ' ' . sprintf( /* translators: %s: list of lists */ __( 'Your lists are: %s.', 'brevo-contact-sync' ), implode( ', ', $pairs ) );
+		} else {
+			$hint = ' ' . __( 'You have no lists yet — create one in Brevo under Contacts → Lists, then select it.', 'brevo-contact-sync' );
+		}
+
+		return new WP_Error(
+			'bcs_bad_list',
+			sprintf( /* translators: %d: list id */ __( 'Brevo list #%d does not exist. Pick a valid list on the Connection page.', 'brevo-contact-sync' ), $list_id ) . $hint
+		);
+	}
+
+	/**
 	 * Lists a given user should be added to, honouring checkout opt-in.
 	 *
 	 * When the checkout opt-in feature is on, a user is only added to the
@@ -272,8 +306,9 @@ class BCS_Sync {
 		if ( empty( self::get_mapping() ) ) {
 			return new WP_Error( 'bcs_no_map', __( 'Map at least one field before syncing.', 'brevo-contact-sync' ) );
 		}
-		if ( empty( self::default_list_ids() ) ) {
-			return new WP_Error( 'bcs_no_list', __( 'Choose a Brevo list on the Connection page first — Brevo\'s bulk import requires a target list. (Create one in Brevo under Contacts → Lists if you have none.)', 'brevo-contact-sync' ) );
+		$list_error = self::validate_list_or_error( $api, self::get_settings()['default_list_id'] );
+		if ( $list_error ) {
+			return $list_error;
 		}
 
 		update_option(
