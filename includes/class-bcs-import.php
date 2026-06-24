@@ -381,6 +381,13 @@ class BCS_Import {
 		}
 
 		$state['offset'] = $new_offset;
+
+		// If cancelled while this batch ran, stop without resurrecting the job.
+		$persisted = (array) get_option( BCS_OPTION_IMPORT, array() );
+		if ( empty( $persisted['running'] ) ) {
+			delete_transient( 'bcs_import_lock' );
+			return;
+		}
 		delete_transient( 'bcs_import_lock' );
 
 		if ( $eof || 0 === $read ) {

@@ -404,6 +404,13 @@ class BCS_Sync {
 			}
 		}
 
+		// If the job was cancelled while this batch ran, stop — don't resurrect it.
+		$persisted = (array) get_option( BCS_OPTION_SYNC, array() );
+		if ( empty( $persisted['running'] ) ) {
+			delete_transient( 'bcs_batch_lock' );
+			return;
+		}
+
 		// Persist progress immediately so the UI reflects each batch.
 		update_option( BCS_OPTION_SYNC, $state );
 		delete_transient( 'bcs_batch_lock' );

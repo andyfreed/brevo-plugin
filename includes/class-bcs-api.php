@@ -70,13 +70,34 @@ class BCS_API {
 			$args['body'] = wp_json_encode( $body );
 		}
 
-		$response = wp_remote_request( $url, $args );
+		// Retry on rate limit (429) and transient server / network errors, so a
+		// big batched sync doesn't silently drop contacts when Brevo throttles.
+		$max_attempts = 4;
+		$attempt      = 0;
+		$response     = null;
+		$code         = 0;
+		do {
+			$attempt++;
+			$response = wp_remote_request( $url, $args );
 
-		if ( is_wp_error( $response ) ) {
-			return $response;
-		}
+			if ( is_wp_error( $response ) ) {
+				if ( $attempt < $max_attempts ) {
+					sleep( $attempt * 2 );
+					continue;
+				}
+				return $response;
+			}
 
-		$code = (int) wp_remote_retrieve_response_code( $response );
+			$code = (int) wp_remote_retrieve_response_code( $response );
+			if ( 429 !== $code && $code < 500 ) {
+				break; // success or a non-retryable client error
+			}
+			if ( $attempt < $max_attempts ) {
+				$retry_after = (int) wp_remote_retrieve_header( $response, 'retry-after' );
+				sleep( $retry_after > 0 ? min( $retry_after, 15 ) : ( $attempt * 2 ) );
+			}
+		} while ( $attempt < $max_attempts );
+
 		$raw  = wp_remote_retrieve_body( $response );
 		$data = json_decode( $raw, true );
 
